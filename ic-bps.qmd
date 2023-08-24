@@ -1,0 +1,599 @@
+---
+title: "Peptidomics analysis reveals changes in small urinary peptides in patients with interstitial cystitis/bladder pain syndrome"
+author: "Md Shadman Ridwan Abid, **Haowen Qiu**, Bridget A. Tripp, Aline de Lima Leite, Heidi E. Roth, Jiri Adamec, Robert Powers & James W. Checco"
+date: "2022-05-18"
+abstract: "Interstitial cystitis/bladder pain syndrome (IC/BPS) is a chronic and debilitating pain disorder of the bladder and urinary tract with poorly understood etiology. A definitive diagnosis of IC/BPS can be challenging because many symptoms are shared with other urological disorders. An analysis of urine presents an attractive and non-invasive resource for monitoring and diagnosing IC/BPS. The antiproliferative factor (APF) peptide has been previously identified in the urine of IC/BPS patients and is a proposed biomarker for the disorder. Nevertheless, other small urinary peptides have remained uninvestigated in IC/BPS primarily because protein biomarker discovery efforts employ protocols that remove small endogenous peptides. The purpose of this study is to investigate the profile of endogenous peptides in IC/BPS patient urine, with the goal of identifying putative peptide biomarkers. Here, a non-targeted peptidomics analysis of urine samples collected from IC/BPS patients were compared to urine samples from asymptomatic controls. Our results show a general increase in the abundance of urinary peptides in IC/BPS patients, which is consistent with an increase in inflammation and protease activity characteristic of this disorder. In total, 71 peptides generated from 39 different proteins were found to be significantly altered in IC/BPS. Five urinary peptides with high variable importance in projection (VIP) coefficients were found to reliably differentiate IC/BPS from healthy controls by receiver operating characteristic (ROC) analysis. In parallel, we also developed a targeted multiple reaction monitoring method to quantify the relative abundance of the APF peptide from patient urine samples. Although the APF peptide was found in moderately higher abundance in IC/BPS relative to control urine, our results show that the APF peptide was inconsistently present in urine, suggesting that its utility as a sole biomarker of IC/BPS may be limited. Overall, our results revealed new insights into the profile of urinary peptides in IC/BPS that will aid in future biomarker discovery and validation efforts."
+doi: "https://doi.org/10.1038/s41598-022-12197-2"
+execute:
+  echo: true
+  #cache: true
+format: 
+  html:
+    toc: true
+    toc-location: left
+    reference-location: document
+    cold-fold: true
+    theme: flatly
+    self-contained: true
+    #cache: true
+
+comments: 
+        hypothesis: true
+---
+
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+suppressPackageStartupMessages(c(
+  library(tidyverse),
+  library(openxlsx),
+  library(janitor),
+  library(knitr),
+  library(impute),
+  library(cowplot),
+  library(proBatch),
+  library(pcaMethods),
+  library(pROC)
+  ))
+```
+
+```{r message = FALSE, warning = FALSE, echo=FALSE}
+script_folder = "../scripts/"
+source(paste(script_folder, "normalization.R", sep = ""))
+source(paste(script_folder, "multivariate.R", sep = ""))
+source(paste(script_folder, "visual_functions.R", sep = ""))
+# get start time
+start_time <- Sys.time()
+```
+
+## Project and data background
+
+In this study, we applied a non-targeted LC--MS and LC--MS/MS-based peptidomics approach to urine collected from IC/BPS patients and asymptomatic controls to explore differences in the profile of small urinary peptides in this disorder (@fig-analytical_workflow a). These experiments identified several peptides that can be used to differentiate IC/BPS urine from controls. In parallel, we also developed and applied a targeted LC-multiple reaction monitoring (MRM) method to compare the relative quantities of the APF peptide present in urine from both IC/BPS patients and asymptomatic controls (@fig-analytical_workflow b).
+
+::: {#fig-analytical_workflow layout-ncol="1"}
+![](https://media.springernature.com/full/springer-static/image/art%3A10.1038%2Fs41598-022-12197-2/MediaObjects/41598_2022_12197_Fig1_HTML.png)
+
+Analytical workflow
+:::
+
+::: {.column-margin}
+
+(a) Non-targeted LC--MS and LC--MS/MS peptidomics analysis used to identify urinary peptides that differ between IC/BPS patients and healthy controls.
+
+(b) Targeted LC-MRM analysis used to determine the relative quantities of the APF peptide in urine from both IC/BPS patients and healthy controls.
+
+:::
+
+## Label-free peptidomics
+
+A total of 995 individual peptides were identified (fragments from 149 different proteins) from the LC--MS and LC--MS/MS datasets using PEAKS Studio proteomics software with a 1% false discovery rate (FDR) threshold. Only 212 peptides with unambiguous sequence assignments were detected in at least 50% of the samples.
+
+
+```{r}
+FDR <- 0.05
+LOG2FC <- 0.6
+
+fh <- openxlsx::read.xlsx("https://static-content.springer.com/esm/art%3A10.1038%2Fs41598-022-12197-2/MediaObjects/41598_2022_12197_MOESM1_ESM.xlsx", sheet = 2, colNames = FALSE) %>%
+        as_tibble() %>%
+        select(-c(2:8))
+
+df = fh %>%
+        janitor::row_to_names(row_number = 2, remove_rows_above = FALSE) %>%
+        janitor::clean_names() %>%
+        as.data.frame() 
+
+labels_d1 <- as.matrix(df[1,-1]) %>%
+        `rownames<-`("Label")
+
+d1 = df[-1,] %>%
+        as_tibble() %>%
+        column_to_rownames(., var = "peptide_sequence") %>%
+        mutate(across(everything(), as.numeric))
+anno = data.frame(Label = as.factor(t(df)[-1, 1]))
+#sum(d1==0) ## Total missing values
+d1[d1 == 0] <- NA ## Change zeros to NA
+#sum(is.na(d1))
+```
+
+
+Data preview 
+
+::: {.panel-tabset .column-page-inset-right}
+
+```{r message=FALSE, warning=FALSE}
+# display table
+d1 %>% 
+        knitr::kable(., digits = 3, "html") %>%
+        kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+        kableExtra::scroll_box(width = "100%", height = "500px")
+```
+
+:::
+
+
+Three step data processing:
+
+* Missing value imputation
+* Log2 transformation
+* EigenMS normalization
+
+::: {.panel-tabset}
+
+### Missing value imputation
+
+
+There is a fair amount of missing values in the dataset, which is typical for MS data in general and untargeted LC-MS proteomics. Missing value imputation was accomplished using KNN. 
+
+::: {.column-margin}
+
+There are potentially three main reasons behind missing values in mass spec data:
+
+* Feature is not present in the biological sample
+
+* Feature is present in the sample but the concentration is below limit of detection
+
+* Feature is present in the sample and above limit of detection but was not annotated as a peak during deconvolution process
+
+:::
+
+
+```{r message=FALSE, warning=FALSE}
+### Use this to count the missing signal values by feature
+d1$nacount <- as.matrix(apply(d1, 1, function(x) sum(is.na(x))))
+
+#write.csv(d1, "Unnormalized peak areas/missingtotals.csv")
+
+d2 <- d1[which(d1$nacount < round((length(d1)-1)*.5)), ]
+d2 <- as.data.frame(d2[,1:length(d2)-1])
+#sum(is.na(d2))
+#[1] 5084
+
+imputed_meta_d1 <- impute::impute.knn(as.matrix(d2),k = 7, rowmax = 0.5,
+                              colmax = 0.8, maxp = 1500)
+
+imputed_d1 <- as.data.frame(imputed_meta_d1[["data"]], colnames = TRUE)
+
+
+hist_impute <- ggplot_truehist(unlist(imputed_d1), "After imputation")
+qq_impute <- ggplot_carqq(unlist(imputed_d1), "After imputation")
+#pca_impute <- ggplot_pca(imputed_d1, labels_d1, "class","After imputation")
+
+```
+
+
+```{r fig.dim=c(12, 6), out.width= "100%", message = FALSE, warning = FALSE, results = "hide"}
+plot_grid(hist_impute, qq_impute, nrow = 1)
+```
+
+
+As is shown above, data after imputation is not normally distributed, therefore log2 transformation is the next step. 
+
+
+### Log2 transformation
+
+Data transformation applies a mathematical transformation on individual values themselves. For mass spec data, log transformation is a good choice, as it reduces or removes the skewness of mass spec data. 
+
+::: {.column-page-inset-right}
+
+```{r message=FALSE, warning=FALSE}
+
+log2_d1 <- log2(type.convert(imputed_d1)) ## log2 transformation
+# save data
+#write.csv(log2_d1, file.path(WORKING_DIR, "log2_transformed.csv"))
+
+# draw histogram
+hist_log2 <- ggplot_truehist(unlist(log2_d1), "Log2 Transformed")
+qq_log2 <- ggplot_carqq(unlist(log2_d1), "Log2 Transformed")
+pca_log2 <- ggplot_pca(log2_d1, anno, "Label","Log2 Transformed")
+```
+
+
+```{r fig.dim=c(18, 6), out.width= "100%", message = FALSE, warning = FALSE, results = "hide"}
+plot_grid(hist_log2, qq_log2, pca_log2, nrow = 1)
+```
+
+
+```{r message=FALSE, warning=FALSE}
+# display table
+log2_d1 %>%
+        mutate(across(everything(), round, digit=2)) %>%
+        knitr::kable(., digits = 3, "html") %>%
+        kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+        kableExtra::scroll_box(width = "100%", height = "500px")
+```
+
+:::
+
+### EigenMS normalization
+
+After imputation and log transformation, the data was normalized using [EigenMS](https://doi.org/10.1371/journal.pone.0116221) to account for sample-to-sample variability. EigenMS normalization preserves the treatment group differences in the data by estimating treatment effects with an ANOVA model, then uses singular value decomposition on the model residual matrix to identify and remove the bias. 
+
+::: {.column-page-inset-right}
+
+```{r message=FALSE, warning=FALSE, eval=FALSE}
+norm_d1 <- do_normalization_short(log2_d1, labels_d1)
+hist_eigenms <- ggplot_truehist(unlist(norm_d1[-1,]), "log2-EigenMS")
+qq_eigenms <- ggplot_carqq(unlist(norm_d1[-1,]), "log2-EigenMS")
+pca_eigenms <- ggplot_pca(norm_d1[-1,], anno, "Label","log2-EigenMS")
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+norm_d1 <- do_normalization_short(log2_d1, labels_d1)
+hist_eigenms <- ggplot_truehist(unlist(norm_d1[-1,]), "log2-EigenMS")
+qq_eigenms <- ggplot_carqq(unlist(norm_d1[-1,]), "log2-EigenMS")
+pca_eigenms <- ggplot_pca(norm_d1[-1,], anno, "Label","log2-EigenMS")
+```
+
+
+```{r fig.dim=c(18, 6), out.width="100%"}
+plot_grid(hist_eigenms, qq_eigenms, pca_eigenms, nrow = 1)
+```
+
+
+```{r}
+norm_d1_mod = norm_d1[-1,] %>%
+        as.data.frame() %>%
+        rownames_to_column(., var = "rowname") %>%
+        mutate(across(-rowname, as.numeric)) %>%
+        column_to_rownames(., var = "rowname")
+#write.csv(norm_d1_mod, file = "after_norm_data.csv")
+# display table
+norm_d1_mod %>% 
+        mutate(across(everything(), round, digit=2)) %>%
+        knitr::kable(., digits = 3, "html") %>%
+        kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+        kableExtra::scroll_box(width = "100%", height = "500px")
+```
+
+:::
+
+### Peak intensity plots
+
+EigenMS removes sample-to-sample variability. 
+
+
+::: {.panel-tabset .column-page-inset-right}
+
+
+### Intensity after log2 transformation
+
+
+```{r message=FALSE, warning=FALSE}
+
+Label = as.matrix(df[1,-1]) %>%
+  t(.) %>%
+  as.data.frame(.) %>%
+  `colnames<-`(., "Label") %>%
+  rownames_to_column(., var = "sample")
+
+color_list = sample_annotation_to_colors(Label,sample_id_col = "sample", factor_columns = c("Label"), numeric_columns = NULL)
+
+# after log2 transformation
+log2_d1_long = matrix_to_long(log2_d1, sample_id_col = "sample")
+
+plot_boxplot(log2_d1_long, Label, sample_id_col = "sample", batch_col = "Label", color_scheme = color_list[["Label"]], ylimits = c(-15,30)) + ylab("Intensity (log2 scale)") # y-range = 45 for comparison purpose
+
+```
+
+
+### Intensity after EigenMS normalization
+
+
+```{r message=FALSE, warning=FALSE}
+#after normalization
+norm_d1_long = matrix_to_long(norm_d1_mod, sample_id_col = "sample")
+
+plot_boxplot(norm_d1_long, Label, sample_id_col = "sample", batch_col = "Label", color_scheme = color_list[["Label"]], ylimits = c(-15,30)) + ylab("Intensity (log2 scale, after normalization)") # y-range = 45 for comparison purpose
+
+```
+
+:::
+
+
+:::
+
+<!-- ::: {.column-margin} -->
+
+<!-- | Name | Abbreviation | -->
+<!-- |:----------:|:-------------------------------------:| -->
+<!-- | pT | p-value from t-test | -->
+<!-- | BHT | adjusted p-value for t-test | -->
+<!-- | pW | p-value from Wilcoxon rank-sum test | -->
+<!-- | BHW | adjusted p-value for Wilcoxon rank-sum test | -->
+<!-- | FC(lin) | linear fold-change | -->
+<!-- | FC(log2) | log2 fold-change | -->
+<!-- | padj | minimum of BHT and BHW | -->
+<!-- | -log10padj | -log10(padj) | -->
+<!-- | Status | (up or down)-regulation | -->
+
+<!-- : Result table column name abbreviation  -->
+
+<!-- ::: -->
+
+## Univariate analysis
+
+Univariate statistic analysis will proceed for each pairs of comparison. For each pair,
+
+Step 1, differential analysis;
+
+* t-test
+
+* Wilcoxon rank-sum test
+
+For all statistical tests, the Benjamini-Hochberg (BH) procedure was applied to correct for multiple hypothesis testing. 
+
+Step 2, fold change, both linear and log2;
+
+Step 3, regulation shown in volcano plot.
+
+* A feature is considered unregulated when `FC(log2)` > 0.6 (or `FC(lin)` > 1.5); 
+
+* A feature is considered downregulated when `FC(log2)` < -0.6 (or `FC(lin)` < -1.5).
+
+
+
+```{r}
+d5 <- rbind.data.frame(labels_d1, norm_d1_mod) 
+d5_mod <- t(d5) %>%
+  as.data.frame(.) %>%
+  rownames_to_column(., var = "rowname") %>%
+  as_tibble() %>%
+  #dplyr::rename(., Label = class) %>%
+  mutate(across(-c(Label,rowname), as.numeric)) %>%
+  #rename_with(str_trim)
+  column_to_rownames(., var = "rowname")
+grps = as.factor(t(labels_d1))
+```
+
+
+::: {.panel-tabset .column-page-inset-right}
+
+
+### Full stat
+
+
+```{r message=FALSE, warning=FALSE}
+temp_d <- d5_mod %>%
+        mutate(across(-Label, ~ 2^(.) )) %>% # d3_mod is log-scale number, this step will de-log and change data back to linear number
+        group_by(Label) %>%
+        summarise(across(everything(), mean))
+
+print(paste("Order of Fold Change:", temp_d$Label[2], "over", temp_d$Label[1], sep = " "))
+
+uni_res <- do_univariate(d5_mod)
+
+uni_res <- uni_res %>%
+        rowwise() %>%
+        mutate(padj = min(c(BHT, BHW))) %>%
+        # get the lowest padj
+        ungroup() %>%
+        mutate(`-log10padj` = -log10(padj))
+
+#uni_res_annotation = uni_res %>% left_join(., feature_meta, by = c("variable" = "Feature"))
+
+#uni_res_annotation %>% create_dt()
+
+uni_res %>% 
+        knitr::kable(., digits = 3, "html") %>%
+        kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+        kableExtra::scroll_box(width = "100%", height = "500px")
+```
+
+
+### Significant stat
+
+Univariate analysis identified 71 peptides with a p-value less than 0.05 from both the BH-corrected t test and Wilcoxon rank-sum tests. These peptides exhibited a statistically significant differential abundance between IC/BPS and healthy controls. The 71 differential peptides were degradation products from a variety of proteins, including several previously associated with IC/BPS from prior proteomics studies. 
+        
+```{r}
+# get DE features only tibble
+uni_res_filt <- uni_res %>%
+        dplyr::filter(BHT < FDR & BHW < FDR) %>%
+        mutate(status = case_when(`FC(log2)` < - 0.6 ~ "Down",
+                                  `FC(log2)` > 0.6 ~ "Up") )
+
+if (nrow(uni_res_filt) == 0){
+        print(paste("There is no significant differentiated features between",
+                    temp_d$Label[2], "and", temp_d$Label[1], sep = " "))
+} else {
+        uni_res_filt = uni_res_filt #%>%
+                #left_join(., feature_meta, by = c("variable" = "Feature"))
+        
+        #write.csv(uni_res_filt, file = paste(combo_list[[i]][1], "vs", combo_list[[i]][2], ".csv", sep = ""))
+        uni_res_filt %>% 
+          knitr::kable(., digits = 3, "html") %>%
+          kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+          kableExtra::scroll_box(width = "100%", height = "500px")
+}
+
+```
+
+
+### Volcano plot
+
+Interestingly, all of the differential peptides were found in a higher abundance in IC/BPS relative to control samples. 
+        
+        
+```{r message=FALSE, warning=FALSE, fig.dim=c(6, 6)}
+# volcano plot
+volcano_plot(uni_res, feature_col = "variable", fdr = FDR, log2fc = LOG2FC, save = FALSE)
+```
+
+
+### Heatmap
+
+
+```{r message=FALSE, warning=FALSE, fig.dim=c(15, 10)}
+# heatmap
+anno <- data.frame(Label = as.factor(t(d5)[, "Label"])) 
+hm <- d5[-1, d5[1,] %in% levels(grps) ] %>%
+        rownames_to_column("variable") %>%
+        mutate(across(-variable, as.numeric)) %>%
+        dplyr::filter(., variable %in% uni_res_filt$variable)
+
+heatmap(hm, feature_col = "variable", sample_anno = anno, rowname_switch = TRUE, save = FALSE)
+
+```
+
+
+:::
+
+## Multivariate analysis 
+
+Supervised PLS-DA is included to assist feature selection, as one of the goal of this study is to identifying putative peptide biomarkers to distinguish between IC/BPS patient urine samples from control urine samples.
+
+::: {.panel-tabset .column-page-inset-right}
+
+### PLS-DA
+
+```{r}
+label = as.character(norm_d1[1, ])
+
+plsda_full <- pls_da(norm_d1_mod, label, WORKING_DIR=getwd())
+plsda_full_res <- plsda_full[[1]]
+plsda_full_plot <- plsda_full[[2]]
+plsda_full_vip <- plsda_full[[3]]
+```
+
+
+
+```{r message=FALSE, warning=FALSE}
+pls_da_score = plsda_full_res@scoreMN %>%
+        as.data.frame(.) %>%
+        rownames_to_column(., var = "name") %>%
+        merge(rownames_to_column(as.data.frame(t(labels_d1)), var = "name"), by = "name")
+
+#write.csv(pls_da_score, file = "after_norm_plsda_score.csv")
+#plsda_merged <- merge(t(rbind.data.frame(labels_d1, norm_d1_mod)),
+#                      plsda_full_res@scoreMN, by=0)
+
+```
+
+
+### VIP table
+
+
+```{r}
+vip = tibble("VIP" = names(plsda_full_vip),
+        "score" = plsda_full_vip ) %>%
+  mutate(across(c("score"), ~round(.x, 4))) 
+
+vip %>% knitr::kable(., digits = 3, "html") %>%
+        kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+        kableExtra::scroll_box(width = "100%", height = "500px")
+
+#write.csv(vip, file = "after_norm_plsda_vip.csv")
+```
+
+
+
+:::
+
+## AUROC 
+
+PLS-DA identified five peptides with a VIP coefficient greater than 2.00 and a p-value less than 0.05 from both a BH-corrected t test and a Wilcoxon rank-sum test. These five peptides were used as input to calculate a ROC curve, which yielded an AUC of 97.0% from a logistic regression model or an AUC of 92.4% from a random forest model.
+
+::: {.column-page-inset-right}
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# First take top variable based on VIP list
+top.vip = dplyr::filter(vip, score>=2)
+d6 = data.frame(matrix(ncol = ncol(norm_d1_mod), nrow = 0))
+colnames(d6) = colnames(norm_d1_mod)
+for (i in 1:nrow(norm_d1_mod)) {
+  if (is.element(rownames(norm_d1_mod)[i], top.vip$VIP )){ #rownames(top.vip)
+    d6 = rbind(d6, norm_d1_mod[i,])
+  }
+}
+d6 = rbind(labels_d1,d6)
+
+# Random forest
+RF = as.data.frame(t(d6)) %>%
+        rownames_to_column(.,var = "rowname")%>%
+        mutate(across(-c(rowname,Label), as.numeric)) %>%
+        column_to_rownames(., var = "rowname")%>%
+        mutate_at(vars(Label), factor)
+
+set.seed(42)
+RF.model = randomForest::randomForest(Label ~ ., data = RF, importance=TRUE, proximity=TRUE)
+
+# Logistic regression
+logistic.model <- glm(Label ~ . , data = RF, family="binomial")
+```
+
+
+```{r message=FALSE, warning=FALSE, fig.dim=c(6,6)}
+par(pty="s")
+logistic_roc = roc(RF$Label,logistic.model$fitted.values, plot=TRUE, legacy.axes=TRUE, percent=TRUE, xlab="False Positive Percentage", ylab="True Postive Percentage", col="#377eb8", lwd=4, print.auc=TRUE,print.auc.cex=1.5 )
+plot.roc(RF$Label, RF.model$votes[,1],percent=TRUE, col="#4daf4a", lwd=4, print.auc=TRUE, add=TRUE, print.auc.y=40, print.auc.cex=1.5)
+legend(50, 20, legend=c("Logisitic Regression", "Random Forest"), col=c("#377eb8", "#4daf4a"), lwd=4, bty = 'n' )
+par(pty="m")
+```
+
+
+These results indicate that the five peptides provide a high predictive capability to distinguish urine from IC/BPS patients and healthy controls. ROC curves using the individual peptides generally showed a reduced predictive capability, demonstrating that the combination of peptide abundances is required for high predictive ability.
+
+
+```{r}
+# create list of combinations of all length from top.vip
+list_top_vip = top.vip$VIP #rownames(top.vip)
+roc_combo_list = do.call(c, lapply(seq_along(list_top_vip), combn, x = list_top_vip, simplify = FALSE))
+
+```
+
+
+```{r message=FALSE, warning=FALSE, fig.dim=c(18, 12)}
+
+par(mfrow=c(2,3))
+
+for (a in 1:5) {
+  temp = data.frame(matrix(ncol = ncol(norm_d1), nrow = 0))
+  colnames(temp) = colnames(norm_d1)
+
+  for (i in 1:nrow(norm_d1)) {
+    if (rownames(norm_d1)[i] == roc_combo_list[[a]]){
+      temp = rbind(temp, norm_d1[i,])
+    }
+    i = i+1
+  }
+  temp = rbind(labels_d1,temp)
+
+  # Random forest
+  RF = as.data.frame(t(temp)) %>%
+    rownames_to_column(.,var = "rowname")%>%
+    mutate(across(-c(rowname,Label), as.numeric)) %>%
+    column_to_rownames(., var = "rowname")%>%
+    mutate_at(vars(Label), factor)
+  set.seed(42)
+  RF.model = randomForest::randomForest(Label ~ ., data = RF, importance=TRUE, proximity=TRUE)
+  # Logistic regression
+  logistic.model <- glm(Label ~ . , data = RF, family="binomial")
+
+  #par(pty="s")
+  roc(RF$Label,logistic.model$fitted.values,plot=TRUE, legacy.axes=TRUE, percent=TRUE, xlab="False Positive Percentage", ylab="True Postive Percentage", main = roc_combo_list[[a]], col="#377eb8", lwd=4, print.auc=TRUE, print.auc.cex=1.5)
+  plot.roc(RF$Label, RF.model$votes[,1],percent=TRUE, col="#4daf4a", lwd=4, print.auc=TRUE, add=TRUE, print.auc.y=40, print.auc.cex=1.5)
+  legend(50, 20, legend=c("Logisitic Regression", "Random Forest"), col=c("#377eb8", "#4daf4a"), lwd=4, bty = 'n' )
+  #par(pty="m")
+}
+
+```
+
+:::
+
+## Reproducibility
+
+The amount of time took to generate the report:
+
+
+```{r time_spend}
+Sys.time() - start_time
+```
+
+
+*R* session information:
+
+
+```{r R_session}
+sessionInfo()
+```
+
+
